@@ -17,8 +17,9 @@
 
 var IPython = (function (IPython) {
     "use strict";
-    
+
     var utils = IPython.utils;
+    var queue = IPython.queue;
 
     // Initialization and connection.
     /**
@@ -44,7 +45,7 @@ var IPython = (function (IPython) {
         } else {
             alert('Your browser does not have WebSocket support, please try Chrome, Safari or Firefox ≥ 6. Firefox 4 and 5 are also supported by you have to enable WebSockets in about:config.');
         }
-        
+
         this.bind_events();
         this.init_iopub_handlers();
         this.comm_manager = new IPython.CommManager(this);
@@ -66,22 +67,22 @@ var IPython = (function (IPython) {
         };
         return msg;
     };
-    
+
     Kernel.prototype.bind_events = function () {
         var that = this;
-        $([IPython.events]).on('send_input_reply.Kernel', function(evt, data) { 
+        $([IPython.events]).on('send_input_reply.Kernel', function(evt, data) {
             that.send_input_reply(data);
         });
     };
-    
+
     // Initialize the iopub handlers
-    
+
     Kernel.prototype.init_iopub_handlers = function () {
         var output_types = ['stream', 'display_data', 'pyout', 'pyerr'];
         this._iopub_handlers = {};
         this.register_iopub_handler('status', $.proxy(this._handle_status_message, this));
         this.register_iopub_handler('clear_output', $.proxy(this._handle_clear_output, this));
-        
+
         for (var i=0; i < output_types.length; i++) {
             this.register_iopub_handler(output_types[i], $.proxy(this._handle_output_message, this));
         }
@@ -160,7 +161,7 @@ var IPython = (function (IPython) {
         this.iopub_channel = new this.WebSocket(
             this.ws_host + utils.url_join_encode(this.kernel_url, "iopub")
         );
-        
+
         var already_called_onclose = false; // only alert once
         var ws_closed_early = function(evt){
             if (already_called_onclose){
@@ -196,6 +197,10 @@ var IPython = (function (IPython) {
         this.shell_channel.onmessage = $.proxy(this._handle_shell_reply, this);
         this.iopub_channel.onmessage = $.proxy(this._handle_iopub_message, this);
         this.stdin_channel.onmessage = $.proxy(this._handle_input_request, this);
+
+        // on establishing connection with websockets flush queue of remainging tasks,
+        // that is tasks that were not executed because of failed connection.
+        this._flush_cell_queue();
     };
 
     /**
@@ -208,7 +213,7 @@ var IPython = (function (IPython) {
         // send the session id so the Session object Python-side
         // has the same identity
         evt.target.send(this.session_id + ':' + document.cookie);
-        
+
         var channels = [this.shell_channel, this.iopub_channel, this.stdin_channel];
         for (var i=0; i < channels.length; i++) {
             // if any channel is not ready, don't trigger event.
@@ -217,7 +222,7 @@ var IPython = (function (IPython) {
         // all events ready, trigger started event.
         $([IPython.events]).trigger('status_started.Kernel', {kernel: this});
     };
-    
+
     /**
      * Stop the websocket channels.
      * @method stop_channels
@@ -233,13 +238,34 @@ var IPython = (function (IPython) {
         this.shell_channel = this.iopub_channel = this.stdin_channel = null;
     };
 
+    /**
+     * Clean up queue from non executed cells.
+     * @method _flush_cell_queue
+     */
+    Kernel.prototype._flush_cell_queue = function () {
+        var cell;
+
+        while (!queue.is_empty()) {
+            cell = queue.get();
+            if (this.shell_channel) {
+                if (cell._execute()) {
+                    queue.remove(cell);
+                }
+            } else {
+                break;
+            }
+        }
+    };
+
     // Main public methods.
-    
+
     // send a message on the Kernel's shell channel
     Kernel.prototype.send_shell_message = function (msg_type, content, callbacks, metadata) {
         var msg = this._get_msg(msg_type, content, metadata);
+
         this.shell_channel.send(JSON.stringify(msg));
         this.set_callbacks_for_msg(msg.header.msg_id, callbacks);
+
         return msg.header.msg_id;
     };
 
@@ -277,7 +303,7 @@ var IPython = (function (IPython) {
         if (callback) {
             callbacks = { shell : { reply : callback } };
         }
-        
+
         if (typeof(objname) !== null && objname !== null) {
             var content = {
                 oname : objname.toString(),
@@ -438,13 +464,13 @@ var IPython = (function (IPython) {
             delete this._msg_callbacks[msg_id];
         }
     };
-    
+
     /* Set callbacks for a particular message.
      * Callbacks should be a struct of the following form:
      * shell : {
-     * 
+     *
      * }
-    
+
      */
     Kernel.prototype.set_callbacks_for_msg = function (msg_id, callbacks) {
         if (callbacks) {
@@ -469,14 +495,14 @@ var IPython = (function (IPython) {
             return;
         }
         var shell_callbacks = callbacks.shell;
-        
+
         // clear callbacks on shell
         delete callbacks.shell;
         delete callbacks.input;
         if (!callbacks.iopub) {
             this.clear_callbacks_for_msg(parent_id);
         }
-        
+
         if (shell_callbacks.reply !== undefined) {
             shell_callbacks.reply(reply);
         }
@@ -502,7 +528,7 @@ var IPython = (function (IPython) {
     Kernel.prototype._handle_status_message = function (msg) {
         var execution_state = msg.content.execution_state;
         var parent_id = msg.parent_header.msg_id;
-        
+
         // dispatch status msg callbacks, if any
         var callbacks = this.get_callbacks_for_msg(parent_id);
         if (callbacks && callbacks.iopub && callbacks.iopub.status) {
@@ -512,7 +538,7 @@ var IPython = (function (IPython) {
                 console.log("Exception in status msg handler", e, e.stack);
             }
         }
-        
+
         if (execution_state === 'busy') {
             $([IPython.events]).trigger('status_busy.Kernel', {kernel: this});
         } else if (execution_state === 'idle') {
@@ -538,8 +564,8 @@ var IPython = (function (IPython) {
             $([IPython.events]).trigger('status_dead.Kernel', {kernel: this});
         }
     };
-    
-    
+
+
     // handle clear_output message
     Kernel.prototype._handle_clear_output = function (msg) {
         var callbacks = this.get_callbacks_for_msg(msg.parent_header.msg_id);

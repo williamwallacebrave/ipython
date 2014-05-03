@@ -46,6 +46,7 @@ var IPython = (function (IPython) {
 
     var utils = IPython.utils;
     var keycodes = IPython.keyboard.keycodes;
+    var queue = IPython.queue;
 
     /**
      * A Cell conceived to write code.
@@ -242,8 +243,8 @@ var IPython = (function (IPython) {
                 this.completer.startCompletion();
                 return true;
             }
-        } 
-        
+        }
+
         // keyboard event wasn't one of those unique to code cells, let's see
         // if it's one of the generic ones (i.e. check edit mode shortcuts)
         return IPython.Cell.prototype.handle_codemirror_keyevent.apply(this, [editor, event]);
@@ -256,12 +257,15 @@ var IPython = (function (IPython) {
     };
 
     /**
-     * Execute current code cell to the kernel
+     * Prepare output area for execution and call execute assuming that
+     * kernel's shell_channel is set up. If not save cell to the queue
+     * which qould be flushed on the event of reconnecting to the shell_channel
+     * websocket.
      * @method execute
      */
     CodeCell.prototype.execute = function () {
         this.output_area.clear_output();
-        
+
         // Clear widget area
         this.widget_subarea.html('');
         this.widget_subarea.height('');
@@ -273,16 +277,34 @@ var IPython = (function (IPython) {
         if (this.last_msg_id) {
             this.kernel.clear_callbacks_for_msg(this.last_msg_id);
         }
-        var callbacks = this.get_callbacks();
-        
-        var old_msg_id = this.last_msg_id;
-        this.last_msg_id = this.kernel.execute(this.get_text(), callbacks, {silent: false, store_history: true});
+
+        if (this.kernel.shell_channel) {
+            this._execute();
+        } else {
+            queue.add(this);
+        }
+    };
+
+
+    /**
+     * Execute current code cell to the kernel
+     * @method _execute
+     */
+    CodeCell.prototype._execute = function () {
+        var callbacks = this.get_callbacks(),
+            old_msg_id = this.last_msg_id;
+
+        this.last_msg_id = this.kernel.execute(
+            this.get_text(), callbacks, {silent: false, store_history: true});
         if (old_msg_id) {
             delete CodeCell.msg_cells[old_msg_id];
         }
         CodeCell.msg_cells[this.last_msg_id] = this;
+
+        return true;
     };
-    
+
+
     /**
      * Construct the default callbacks for
      * @method get_callbacks
@@ -303,7 +325,7 @@ var IPython = (function (IPython) {
             input : $.proxy(this._handle_input_request, this)
         };
     };
-    
+
     CodeCell.prototype._open_with_pager = function (payload) {
         $([IPython.events]).trigger('open_with_text.Pager', payload);
     };
@@ -352,7 +374,7 @@ var IPython = (function (IPython) {
         // Always execute, even if we are already in the rendered state
         return cont;
     };
-    
+
     CodeCell.prototype.unrender = function () {
         // CodeCell is always rendered
         return false;
